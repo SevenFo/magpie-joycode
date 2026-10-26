@@ -17,7 +17,7 @@ magpie plugin login joycode
 
 默认使用 JoyCode 公网签名网关，无需额外配置。
 
-通过 Magpie 插件的“选项”填写 JSON，或在命令行设置：
+通过命令行设置，配置保存在 Magpie 本机：
 
 ```sh
 magpie plugin options magpie-joycode '{"gatewayMode":"color","baseURL":"https://gateway.example.com"}'

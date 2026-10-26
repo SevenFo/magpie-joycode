@@ -1,5 +1,9 @@
 # 更新记录
 
+## 0.2.1
+
+- 明确网关配置的命令行入口。
+
 ## 0.2.0
 
 - 根据模型的协议声明选择 Chat Completions、Responses 或 Anthropic 接口。
