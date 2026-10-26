@@ -1,8 +1,13 @@
 {
-  "name": "magpie-community-plugins",
-  "private": true,
-  "workspaces": ["packages/*"],
-  "scripts": {
-    "check": "bun scripts/check.mjs"
-  }
+  "name": "magpie-joycode",
+  "version": "0.2.0",
+  "description": "JoyCode models in Magpie, with native model protocols and configurable gateways",
+  "type": "module",
+  "main": "./packages/joycode/index.mjs",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/SevenFo/magpie-joycode.git" },
+  "keywords": ["magpie-plugin", "opencode-plugin", "joycode"],
+  "files": ["packages/joycode/index.mjs", "packages/joycode/icon.png", "packages/joycode/LICENSE", "README.md", "LICENSE"],
+  "scripts": { "test": "node --test packages/joycode/*.test.mjs" },
+  "magpie": { "maxConcurrency": 4, "icon": "packages/joycode/icon.png" }
 }

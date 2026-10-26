@@ -6,10 +6,10 @@
  * Protocol derived from the JoyCode IDE's bundled extension.js:
  *   POST https://api-ai.jd.com/api?appid=joycode_ide&functionId=chat_completions&t=<ms>&sign=<hmac>
  *   headers: ptKey (account ticket), loginType, optional tenant
- *   body:    OpenAI chat completions JSON
+ *   body:    the model's native Chat, Responses, or Anthropic request
  *
- * magpie's gateway already converts any agent API into OpenAI chat
- * completions format before calling our fetch. We sign each request, inject
+ * magpie converts agent requests into the protocol declared by each model's
+ * AI SDK package. We route that native request, inject
  * credential headers, and add authenticated account identity to the body.
  * We inspect response prefixes for bare JSON gateway errors; valid SSE bytes
  * are replayed unchanged, including tool-call deltas.
@@ -18,6 +18,9 @@
  *   { "flatten": true }  — flatten multi-turn messages into a single prompt
  *   before sending (fallback if JoyCode rejects multi-turn / tool-call
  *   payloads). Drops tools; useful for plain chat only.
+ *   { gatewayMode: 'color' | 'direct', baseURL, accountBaseURL } overrides
+ *   gateways locally. Direct mode needs a baseURL and keeps the default
+ *   public account gateway unless accountBaseURL is also set.
  */
 import { createHmac, randomBytes } from 'node:crypto'
 import { createServer } from 'node:http'
@@ -26,8 +29,51 @@ const PROVIDER = 'joycode'
 const BASE = 'https://api-ai.jd.com'
 const GATEWAY_PATH = '/api'
 const APPID = 'joycode_ide'
-const FUNCTION_ID = 'chat_completions'
 const LOGIN_TYPE = 'PIN_JD_CLOUD'
+const PROTOCOLS = {
+  chat: { npm: '@ai-sdk/openai-compatible', functionId: 'chat_completions', path: '/chat/completions' },
+  responses: { npm: '@ai-sdk/openai', functionId: 'responses_completions', path: '/responses' },
+  anthropic: { npm: '@ai-sdk/anthropic', functionId: 'anthropic_completions', path: '/messages' },
+}
+
+function baseURL(value) {
+  const url = new URL(value)
+  if (!['https:', 'http:'].includes(url.protocol) || url.username || url.password || url.search || url.hash) {
+    throw new Error('Gateway must be an HTTP(S) base URL without credentials, query, or fragment')
+  }
+  return url.toString().replace(/\/+$/, '')
+}
+
+function gatewayOptions(options = {}) {
+  const mode = options.gatewayMode ?? process.env.JOYCODE_GATEWAY_MODE ?? 'color'
+  if (!['color', 'direct'].includes(mode)) throw new Error('gatewayMode must be color or direct')
+  const configured = options.baseURL ?? process.env.JOYCODE_BASE_URL
+  if (mode === 'direct' && !configured) throw new Error('Direct mode needs a baseURL')
+  const base = baseURL(configured ?? BASE)
+  const accountBase = baseURL(options.accountBaseURL ?? process.env.JOYCODE_ACCOUNT_BASE_URL ?? (mode === 'color' ? base : BASE))
+  return { mode, base, accountBase }
+}
+
+function modelProtocol(model) {
+  let metadata = model.extJson ?? model.ext ?? {}
+  if (typeof metadata === 'string') {
+    try { metadata = JSON.parse(metadata) } catch { metadata = {} }
+  }
+  if (metadata?.adapterType === 'openai-response') return 'responses'
+  if (metadata?.adapterType === 'anthropic') return 'anthropic'
+  return 'chat'
+}
+
+function requestProtocol(input) {
+  const path = new URL(typeof input === 'string' ? input : input.url ?? String(input)).pathname.replace(/\/+$/, '')
+  for (const [name, spec] of Object.entries(PROTOCOLS)) if (path.endsWith(spec.path)) return name
+  throw new Error('Unsupported JoyCode request endpoint')
+}
+
+function requestURL(protocol, gateway) {
+  const spec = PROTOCOLS[protocol]
+  return gateway.mode === 'color' ? buildGatewayUrl(spec.functionId, gateway.base) : gateway.base + spec.path
+}
 
 // HMAC signing key, extracted from the JoyCode IDE's bundled extension.js.
 //
@@ -104,8 +150,10 @@ function signQuery(functionId, extra = {}) {
 }
 
 /** Build the signed gateway URL for one request. */
-function buildGatewayUrl(functionId) {
-  const u = new URL(GATEWAY_PATH, BASE)
+function buildGatewayUrl(functionId, base = BASE) {
+  const u = new URL(base)
+  const prefix = u.pathname.replace(/\/+$/, '')
+  u.pathname = prefix.endsWith(GATEWAY_PATH) ? prefix : prefix + GATEWAY_PATH
   for (const [k, v] of Object.entries(signQuery(functionId))) u.searchParams.set(k, String(v))
   return u.toString()
 }
@@ -196,9 +244,10 @@ function flattenBody(payload) {
  */
 const LOGIN_URL = 'https://joycode.jd.com/login/'
 
-function callUserInfo(ptKey, loginType, tenant) {
-  return fetch(buildGatewayUrl('joycode_userInfo'), {
+function callUserInfo(ptKey, loginType, tenant, accountBase = BASE) {
+  return fetch(buildGatewayUrl('joycode_userInfo', accountBase), {
     method: 'POST',
+    redirect: 'error',
     headers: {
       'content-type': 'application/json',
       ...buildGatewayHeaders(ptKey, tenant, loginType || LOGIN_TYPE),
@@ -222,7 +271,7 @@ function callUserInfo(ptKey, loginType, tenant) {
  *   magpie opens `url`; callback() resolves when our loopback server gets
  *   the redirect.
  */
-async function browserLogin() {
+async function browserLogin(accountBase = BASE) {
   const authKey = randomBytes(16).toString('hex')
 
   // Start the loopback server first so the port in the URL is live.
@@ -253,7 +302,7 @@ async function browserLogin() {
     if (!ptKey) return finish(false, '登录页没有返回 pt_key')
     // The gateway wraps user information in { code: 0, data: { userId, ... } }.
     // Never display its raw response: it contains private account fields.
-    callUserInfo(ptKey, loginType, tenant)
+    callUserInfo(ptKey, loginType, tenant, accountBase)
       .then(({ ok, status, user }) => {
         if (ok) {
           finish(true, '', { ptKey, loginType, tenant, userName: user.userName || user.userId })
@@ -303,7 +352,31 @@ function chatError(status, code, message) {
   })
 }
 
-async function normalizeChatResponse(response) {
+// The signed gateway can wrap a native SSE field in another `data:` field.
+// Decode complete lines so a network chunk split, including UTF-8, cannot
+// hide the extra prefix. Already-native SSE lines are left unchanged.
+function unwrapGatewaySSE(stream) {
+  const decoder = new TextDecoder('utf-8', { ignoreBOM: true })
+  const encoder = new TextEncoder()
+  let pending = ''
+  const line = value => value.replace(/^data: ?(?=(?:data|event|id|retry):|:)/, '')
+  return stream.pipeThrough(new TransformStream({
+    transform(chunk, controller) {
+      pending += decoder.decode(chunk, { stream: true })
+      let end
+      while ((end = pending.indexOf('\n')) !== -1) {
+        controller.enqueue(encoder.encode(line(pending.slice(0, end + 1))))
+        pending = pending.slice(end + 1)
+      }
+    },
+    flush(controller) {
+      pending += decoder.decode()
+      if (pending) controller.enqueue(encoder.encode(line(pending)))
+    },
+  }))
+}
+
+async function normalizeResponse(response, protocol = 'chat') {
   if (!response.ok) {
     const headers = new Headers(response.headers)
     headers.set('x-magpie-sign-in', response.status === 401 ? 'expired' : 'kept')
@@ -345,14 +418,17 @@ async function normalizeChatResponse(response) {
       const message = json.error?.message ?? json.message ?? json.msg
       return chatError(status, code, typeof message === 'string' ? message.slice(0, 500) : 'JoyCode 请求被拒绝')
     }
-    if (json?.choices) return Response.json(json)
+    const valid = protocol === 'responses' ? json?.object === 'response' && Array.isArray(json.output)
+      : protocol === 'anthropic' ? json?.type === 'message' && Array.isArray(json.content)
+      : Array.isArray(json?.choices)
+    if (valid) return Response.json(json)
     return chatError(502, 'invalid_response', 'JoyCode 未返回有效的对话响应')
   }
-  // Replay the inspected bytes and then stream normally, preserving tool deltas.
+  // Replay the inspected bytes, then unwrap only duplicate SSE field prefixes.
   const headers = new Headers(response.headers)
   headers.delete('content-length')
   headers.delete('content-encoding')
-  return new Response(new ReadableStream({
+  const stream = new ReadableStream({
     async pull(controller) {
       if (buffered.length) { controller.enqueue(buffered.shift()); return }
       try {
@@ -362,19 +438,21 @@ async function normalizeChatResponse(response) {
       } catch (error) { controller.error(error) }
     },
     cancel(reason) { return reader.cancel(reason) },
-  }), { status: response.status, headers })
+  })
+  return new Response(unwrapGatewaySSE(stream), { status: response.status, headers })
 }
 
 // ---------------------------------------------------------------- account data
 
-async function fetchAccountData(auth, functionId, body = {}) {
+async function fetchAccountData(auth, functionId, body = {}, accountBase = BASE) {
   if (auth?.type !== 'api' || !auth.key) {
     throw Object.assign(new Error('请先登录 JoyCode'), { signIn: 'expired' })
   }
   let response
   try {
-    response = await fetch(buildGatewayUrl(functionId), {
+    response = await fetch(buildGatewayUrl(functionId, accountBase), {
       method: 'POST',
+      redirect: 'error',
       headers: {
         'content-type': 'application/json; charset=UTF-8',
         ...buildGatewayHeaders(auth.key, auth.metadata?.tenant, auth.metadata?.loginType || LOGIN_TYPE),
@@ -439,11 +517,11 @@ function billingScene(value, depth = 0) {
   }
 }
 
-async function accountModels(provider, { auth } = {}) {
+async function accountModels(provider, { auth } = {}, gateway = gatewayOptions()) {
   if (auth?.type !== 'api' || !auth.key) return provider.models
   const [catalogue, pricing] = await Promise.allSettled([
-    fetchAccountData(auth, 'joycode_modelList'),
-    fetchAccountData(auth, 'plugin_config', { sceneType: 'billingRate' }),
+    fetchAccountData(auth, 'joycode_modelList', {}, gateway.accountBase),
+    fetchAccountData(auth, 'plugin_config', { sceneType: 'billingRate' }, gateway.accountBase),
   ])
   for (const result of [catalogue, pricing]) {
     if (result.status === 'rejected' && result.reason?.signIn === 'expired') throw result.reason
@@ -469,7 +547,7 @@ async function accountModels(provider, { auth } = {}) {
       ...rest,
       id,
       name: model.label || id,
-      api: { id, url: `${BASE}/v1`, npm: '@ai-sdk/openai-compatible' },
+      api: { id, url: gateway.mode === 'direct' ? gateway.base : `${gateway.base}/v1`, npm: PROTOCOLS[modelProtocol(model)].npm },
       limit: {
         ...base.limit,
         context: Number.isFinite(model.maxTotalTokens) ? model.maxTotalTokens : base.limit?.context ?? 200000,
@@ -491,6 +569,7 @@ async function accountModels(provider, { auth } = {}) {
 
 export const JoyCodeAuthPlugin = async (_input, options) => {
   const flatten = options?.flatten === true
+  const gateway = gatewayOptions(options)
 
   return {
     // Provider + models available before anyone signs in.
@@ -504,7 +583,7 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
       }
     },
 
-    provider: { id: PROVIDER, models: accountModels },
+    provider: { id: PROVIDER, models: (provider, context) => accountModels(provider, context, gateway) },
 
     auth: {
       provider: PROVIDER,
@@ -512,7 +591,7 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
         {
           type: 'oauth',
           label: '浏览器登录（京东账号）',
-          authorize: browserLogin,
+          authorize: () => browserLogin(gateway.accountBase),
         },
         {
           type: 'api',
@@ -540,7 +619,7 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
         // Resolve native chat identity once per account loader, never globally.
         let identityPromise
         const identity = () => {
-          identityPromise ??= fetchAccountData(auth, 'joycode_userInfo').then(user => {
+          identityPromise ??= fetchAccountData(auth, 'joycode_userInfo', {}, gateway.accountBase).then(user => {
             if (typeof user?.userId !== 'string' || !user.userId) throw new Error('JoyCode 未返回账号身份')
             return { userId: user.userId, tenant: user.tenant || tenant, orgFullName: user.orgFullName || '' }
           }).catch(error => { identityPromise = undefined; throw error })
@@ -550,9 +629,11 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
         return {
           // Placeholder only — our fetch rewrites the full URL each request,
           // because the signature embeds a fresh timestamp.
-          baseURL: `${BASE}/v1`,
+          baseURL: gateway.mode === 'direct' ? gateway.base : `${gateway.base}/v1`,
 
           async fetch(_input, init) {
+            const protocol = requestProtocol(_input)
+            if (flatten && protocol !== 'chat') throw new Error('flatten is only supported for Chat Completions models')
             // Preserve chat structure; the IDE also adds authenticated metadata.
             const account = await identity()
             const source = typeof init?.body === 'string' ? init.body : new TextDecoder().decode(init?.body)
@@ -564,7 +645,7 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
             })
 
             // 2) URL: fresh signature per request.
-            const url = buildGatewayUrl(FUNCTION_ID)
+            const url = requestURL(protocol, gateway)
 
             // 3) Headers: keep what magpie synthesized (content-type, …),
             //    add the gateway credentials, drop the OpenAI-style bearer
@@ -573,19 +654,19 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
             for (const [k, v] of Object.entries(buildGatewayHeaders(ptKey, account.tenant, loginType))) {
               headers.set(k, v)
             }
-            headers.delete('authorization')
+            for (const name of ['authorization', 'proxy-authorization', 'cookie', 'x-api-key']) headers.delete(name)
 
             // 4) Forward (...init carries the abort signal).
-            const resp = await fetch(url, { ...init, headers, body })
+            const resp = await fetch(url, { ...init, headers, body, redirect: 'error' })
 
-            return normalizeChatResponse(resp)
+            return normalizeResponse(resp, protocol)
           },
         }
       },
 
       async usage(getAuth) {
         try {
-          return quotaFromData(await fetchAccountData(await getAuth(), 'get_newpoint_ide'))
+          return quotaFromData(await fetchAccountData(await getAuth(), 'get_newpoint_ide', {}, gateway.accountBase))
         } catch (error) {
           return {
             error: error.message,

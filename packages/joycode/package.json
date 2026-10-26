@@ -1,12 +1,12 @@
 {
-  "name": "@magpie-community/opencode-joycode-auth",
-  "version": "0.1.1",
+  "name": "@sevenfo/opencode-joycode-auth",
+  "version": "0.2.0",
   "description": "OpenCode provider plugin: JoyCode (JD Cloud JoyCoder IDE credits)",
   "type": "module",
   "main": "./index.mjs",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/magpie-community/plugins.git",
+    "url": "git+https://github.com/SevenFo/magpie-joycode.git",
     "directory": "packages/joycode"
   },
   "scripts": {
