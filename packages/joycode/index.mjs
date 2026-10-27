@@ -54,11 +54,27 @@ function gatewayOptions(options = {}) {
   return { mode, base, accountBase }
 }
 
-function modelProtocol(model) {
+function modelMetadata(model) {
   let metadata = model.extJson ?? model.ext ?? {}
   if (typeof metadata === 'string') {
     try { metadata = JSON.parse(metadata) } catch { metadata = {} }
   }
+  return metadata && typeof metadata === 'object' && !Array.isArray(metadata) ? metadata : {}
+}
+
+const REASONING_EFFORTS = new Set(['none', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max'])
+function modelReasoning(model) {
+  const metadata = modelMetadata(model).reasoning
+  if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) return undefined
+  const levels = [...new Set((Array.isArray(metadata.efforts) ? metadata.efforts : [])
+    .map(item => typeof item === 'string' ? item : item?.value)
+    .filter(value => REASONING_EFFORTS.has(value)))]
+  return { levels, defaultEffort: levels.includes(metadata.defaultEffort) ? metadata.defaultEffort : undefined,
+    sendThinking: metadata.sendThinking === true, toggle: metadata.toggle === true }
+}
+
+function modelProtocol(model) {
+  const metadata = modelMetadata(model)
   if (metadata?.adapterType === 'openai-response') return 'responses'
   if (metadata?.adapterType === 'anthropic') return 'anthropic'
   return 'chat'
@@ -86,43 +102,6 @@ function requestURL(protocol, gateway) {
 // If JoyCode ever rotates the key, re-extract it from extension.js and update
 // this constant (or override at runtime via JOYCODE_SIGN_KEY).
 const SIGN_KEY = process.env.JOYCODE_SIGN_KEY || '0691a3f0b37b4a85aeb63ad0fc7db3ed'
-
-/** Models the JoyCode backend offers (from /joycode_modelList). */
-const MODELS = {
-  'JoyAI-Code-1.6': {
-    name: 'JoyAI Code 1.6',
-    limit: { context: 200000, output: 64000 },
-    tool_call: true,
-  },
-  'GLM-5.3-agent': {
-    name: 'GLM 5.3',
-    limit: { context: 200000, output: 64000 },
-    reasoning: true,
-    tool_call: true,
-    modalities: { input: ['text'] },
-  },
-  'Kimi-K2.6-agent': {
-    name: 'Kimi K2.6',
-    limit: { context: 200000, output: 64000 },
-    reasoning: true,
-    tool_call: true,
-    modalities: { input: ['text', 'image'] },
-  },
-  'MiniMax-M3-agent': {
-    name: 'MiniMax M3',
-    limit: { context: 200000, output: 64000 },
-    reasoning: true,
-    tool_call: true,
-    modalities: { input: ['text', 'image'] },
-  },
-  'Doubao-Seed-2.0-pro-agent': {
-    name: 'Doubao Seed 2.0 Pro',
-    limit: { context: 200000, output: 64000 },
-    reasoning: true,
-    tool_call: true,
-    modalities: { input: ['text', 'image'] },
-  },
-}
 
 // ---------------------------------------------------------------- helpers
 // (not exported as module functions: the plugin host treats every exported
@@ -517,8 +496,8 @@ function billingScene(value, depth = 0) {
   }
 }
 
-async function accountModels(provider, { auth } = {}, gateway = gatewayOptions()) {
-  if (auth?.type !== 'api' || !auth.key) return provider.models
+async function accountModels(_provider, { auth } = {}, gateway = gatewayOptions()) {
+  if (auth?.type !== 'api' || !auth.key) return {}
   const [catalogue, pricing] = await Promise.allSettled([
     fetchAccountData(auth, 'joycode_modelList', {}, gateway.accountBase),
     fetchAccountData(auth, 'plugin_config', { sceneType: 'billingRate' }, gateway.accountBase),
@@ -526,7 +505,7 @@ async function accountModels(provider, { auth } = {}, gateway = gatewayOptions()
   for (const result of [catalogue, pricing]) {
     if (result.status === 'rejected' && result.reason?.signIn === 'expired') throw result.reason
   }
-  if (catalogue.status !== 'fulfilled' || !Array.isArray(catalogue.value)) return provider.models
+  if (catalogue.status !== 'fulfilled' || !Array.isArray(catalogue.value)) return {}
   const scene = pricing.status === 'fulfilled' ? billingScene(pricing.value) : undefined
   const tenant = auth.metadata?.tenant?.trim()
   const excluded = (scene?.excludeTenants ?? []).some(value => typeof value === 'string' && value.trim() === tenant)
@@ -537,28 +516,30 @@ async function accountModels(provider, { auth } = {}, gateway = gatewayOptions()
     const id = model?.chatApiModel
     if (typeof id !== 'string' || !id || model.hidden || model.isHidden ||
       (model.modelFunctionType && !['ALL', 'chat', 'agent'].includes(model.modelFunctionType))) continue
-    const base = provider.models?.[id] ?? {}
     const features = Array.isArray(model.features) ? model.features : []
     const image = features.includes('vision')
     const rate = multiplier(model.billingRate) ?? rates.get(id)
-    // Remove old rate fields so unavailable pricing never becomes fake free usage.
-    const { rate: oldRate, rateWas, free, ...rest } = base
+    const reasoning = modelReasoning(model)
     models[id] = {
-      ...rest,
       id,
       name: model.label || id,
       api: { id, url: gateway.mode === 'direct' ? gateway.base : `${gateway.base}/v1`, npm: PROTOCOLS[modelProtocol(model)].npm },
       limit: {
-        ...base.limit,
-        context: Number.isFinite(model.maxTotalTokens) ? model.maxTotalTokens : base.limit?.context ?? 200000,
-        output: Number.isFinite(model.respMaxTokens) ? model.respMaxTokens : base.limit?.output ?? 64000,
+        context: Number.isFinite(model.maxTotalTokens) ? model.maxTotalTokens : 200000,
+        output: Number.isFinite(model.respMaxTokens) ? model.respMaxTokens : 64000,
       },
       capabilities: {
-        ...base.capabilities,
+        ...(reasoning && (reasoning.levels.length || reasoning.toggle)
+          ? { reasoning: true } : {}),
         toolcall: features.includes('function_call'),
-        input: { ...base.capabilities?.input, text: true, image },
+        input: { text: true, image },
       },
       modalities: { input: image ? ['text', 'image'] : ['text'] },
+      ...(reasoning?.levels.length ? {
+        reasoning: true,
+        variants: Object.fromEntries(reasoning.levels.map(effort => [effort, { reasoningEffort: effort }])),
+        options: reasoning.defaultEffort ? { reasoningEffort: reasoning.defaultEffort } : {},
+      } : {}),
       ...(rate !== undefined ? { rate, free: rate === 0 } : {}),
     }
   }
@@ -572,14 +553,14 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
   const gateway = gatewayOptions(options)
 
   return {
-    // Provider + models available before anyone signs in.
+    // Register the provider before sign-in; only the account API supplies models.
     config: async (cfg) => {
       cfg.provider ??= {}
       cfg.provider[PROVIDER] ??= {
         name: 'JoyCode',
         npm: '@ai-sdk/openai-compatible', // chat completions
         api: BASE,
-        models: MODELS,
+        models: {},
       }
     },
 
@@ -618,6 +599,13 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
         if (!ptKey) return {}
         // Resolve native chat identity once per account loader, never globally.
         let identityPromise
+        let reasoningPromise
+        const reasoningFor = async model => {
+          reasoningPromise ??= fetchAccountData(auth, 'joycode_modelList', {}, gateway.accountBase)
+            .then(models => new Map((Array.isArray(models) ? models : []).map(model => [model.chatApiModel, modelReasoning(model)])))
+            .catch(() => { reasoningPromise = undefined; return new Map() })
+          return (await reasoningPromise).get(model)
+        }
         const identity = () => {
           identityPromise ??= fetchAccountData(auth, 'joycode_userInfo', {}, gateway.accountBase).then(user => {
             if (typeof user?.userId !== 'string' || !user.userId) throw new Error('JoyCode 未返回账号身份')
@@ -638,6 +626,16 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
             const account = await identity()
             const source = typeof init?.body === 'string' ? init.body : new TextDecoder().decode(init?.body)
             const payload = JSON.parse(source)
+            // Some Chat backends require the separate thinking switch. The
+            // account's own model metadata says which; never infer it by name.
+            if (protocol === 'chat' && payload.reasoning_effort !== undefined && payload.thinking === undefined) {
+              const reasoning = await reasoningFor(payload.model)
+              if (reasoning?.sendThinking) {
+                const disabled = payload.reasoning_effort === 'none'
+                payload.thinking = { type: disabled ? 'disabled' : 'enabled' }
+                if (disabled) delete payload.reasoning_effort
+              }
+            }
             const body = JSON.stringify({
               ...(flatten ? flattenBody(payload) : payload),
               ...account,
@@ -684,7 +682,7 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
 // Test surface (bun test). Everything testable lives on this object so the
 // entry module exports no bare functions besides the plugin — see the note
 // on the helpers above.
-export const _internal = { signQuery, buildGatewayUrl, buildGatewayHeaders, flattenMessages, MODELS }
+export const _internal = { signQuery, buildGatewayUrl, buildGatewayHeaders, flattenMessages, modelReasoning }
 
 // OpenCode v1 form: with default { id, server } the host takes only
 // `server` as the plugin and never iterates the module's other exports.

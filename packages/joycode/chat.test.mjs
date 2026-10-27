@@ -10,7 +10,7 @@ async function request(t, response) {
   const loader = await hooks.auth.loader(async () => ({ type: 'api', key: 'fake-key' }))
   return loader.fetch('https://api-ai.jd.com/v1/chat/completions', {
     method: 'POST', headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ model: 'JoyAI-Code-1.6', messages: [{ role: 'user', content: 'OK' }], stream: true }),
+    body: JSON.stringify({ model: 'Example Chat', messages: [{ role: 'user', content: 'OK' }], stream: true }),
   })
 }
 function chunks(parts) {
@@ -42,7 +42,7 @@ test('HTTP 200 SSE code 401 expires a ticket after identity has been cached', as
   const hooks = await plugin.server({})
   const loader = await hooks.auth.loader(async () => ({ type: 'api', key: 'fake-key' }))
   const send = () => loader.fetch('https://api-ai.jd.com/v1/chat/completions', {
-    method: 'POST', body: JSON.stringify({ model: 'JoyAI-Code-1.6', messages: [{ role: 'user', content: 'OK' }], stream: true }),
+    method: 'POST', body: JSON.stringify({ model: 'Example Chat', messages: [{ role: 'user', content: 'OK' }], stream: true }),
   })
   const first = await send()
   assert.equal(first.status, 200)
@@ -67,7 +67,7 @@ test('empty upstream success becomes gateway error', async t => {
 })
 test('chat adds authenticated account metadata while preserving tools and messages', async t => {
   let infoCalls = 0
-  const payload = { model: 'JoyAI-Code-1.6', messages: [{ role: 'user', content: 'OK' }], tools: [{ type: 'function', function: { name: 'ping', parameters: { type: 'object' } } }], stream: true, userId: 'untrusted-user' }
+  const payload = { model: 'Example Chat', messages: [{ role: 'user', content: 'OK' }], tools: [{ type: 'function', function: { name: 'ping', parameters: { type: 'object' } } }], stream: true, userId: 'untrusted-user' }
   t.mock.method(globalThis, 'fetch', async (url, init) => {
     if (new URL(url).searchParams.get('functionId') === 'joycode_userInfo') {
       infoCalls++
