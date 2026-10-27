@@ -15,7 +15,7 @@ magpie plugin login joycode
 
 ## 模型目录和思考强度
 
-`0.2.2` 从账号模型目录的 `extJson.reasoning`（也兼容 JSON 字符串 `ext`）读取每个模型的档位和默认值，声明 reasoning 能力和 variants。不会根据模型名字给所有模型填相同档位。Responses 请求保留原生 `reasoning.effort`；Chat 请求保留 `reasoning_effort`，只对上游标记 `sendThinking` 的模型补充 thinking 开关，保留调用方已有设置。
+`0.2.3` 从账号模型目录的 `extJson.reasoning`（也兼容 JSON 字符串 `ext`）读取每个模型的档位和默认值，声明 reasoning 能力和 variants。不会根据模型名字给所有模型填相同档位。Responses 请求保留原生 `reasoning.effort`；Chat 请求保留 `reasoning_effort`，只对上游标记 `sendThinking` 的模型补充 thinking 开关，保留调用方已有设置。
 
 正常登录后展示的模型名称、可见性和每个模型的档位来自运行时登录账号的上游目录，不在此处列出任何账号的模型清单。验收覆盖了能力声明、合法与非法档位、参数传递及工具调用往返。部分后端不严格校验未知档位，因此不能单凭 HTTP 成功证明内部计算强度发生变化。
 

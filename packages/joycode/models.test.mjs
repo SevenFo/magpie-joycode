@@ -71,12 +71,15 @@ test('unsigned providers have no model list and do not query the account', async
   }
 })
 
-test('empty, malformed and hidden account lists never restore old model declarations', async t => {
-  for (const list of [[], null, {}, [{ chatApiModel: 'Hidden Model', hidden: true }]]) {
+for (const [name, list] of [
+  ['empty', []], ['null', null], ['malformed', {}],
+  ['hidden', [{ chatApiModel: 'Hidden Model', hidden: true }]],
+]) {
+  test(`${name} account lists never restore old model declarations`, async t => {
     const { models } = await load(t, { list })
     assert.deepEqual(models, {})
-  }
-})
+  })
+}
 
 test('old provider declarations cannot add models or override current account capabilities', async t => {
   t.mock.method(globalThis, 'fetch', async url => Response.json({ code: 0,
