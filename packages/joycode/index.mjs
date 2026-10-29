@@ -86,6 +86,16 @@ function requestProtocol(input) {
   throw new Error('Unsupported JoyCode request endpoint')
 }
 
+// Anthropic clients may probe /messages/count_tokens before generating.
+// JoyCode has no token-count endpoint, so answer locally with a 404 and let
+// magpie fall back to its own estimate instead of signing a paid request.
+// Ported from upstream joycode 0.2.0 (f653369); the rest of that release
+// duplicates routing and SSE handling this fork already has.
+function isCountTokensRequest(input) {
+  const path = new URL(typeof input === 'string' ? input : input.url ?? String(input)).pathname.replace(/\/+$/, '')
+  return path.endsWith('/messages/count_tokens')
+}
+
 function requestURL(protocol, gateway) {
   const spec = PROTOCOLS[protocol]
   return gateway.mode === 'color' ? buildGatewayUrl(spec.functionId, gateway.base) : gateway.base + spec.path
@@ -620,6 +630,11 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
           baseURL: gateway.mode === 'direct' ? gateway.base : `${gateway.base}/v1`,
 
           async fetch(_input, init) {
+            if (isCountTokensRequest(_input)) {
+              return Response.json({
+                error: { type: 'unsupported_endpoint', message: 'JoyCode does not provide token counting' },
+              }, { status: 404 })
+            }
             const protocol = requestProtocol(_input)
             if (flatten && protocol !== 'chat') throw new Error('flatten is only supported for Chat Completions models')
             // Preserve chat structure; the IDE also adds authenticated metadata.

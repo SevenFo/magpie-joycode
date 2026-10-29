@@ -1,6 +1,6 @@
 {
   "name": "magpie-joycode",
-  "version": "0.2.3",
+  "version": "0.2.4",
   "description": "JoyCode models in Magpie, with native model protocols and configurable gateways",
   "type": "module",
   "main": "./packages/joycode/index.mjs",

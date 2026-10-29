@@ -162,3 +162,15 @@ for (const [protocol, path, native] of [
     assert.equal(await r.text(), native)
   })
 }
+
+test('anthropic count_tokens is answered locally with 404, nothing goes upstream', async t => {
+  let upstreamCalls = 0
+  t.mock.method(globalThis, 'fetch', async () => { upstreamCalls++; throw new Error('count_tokens must not call upstream') })
+  const loader = await (await plugin.server({})).auth.loader(async () => auth)
+  const r = await loader.fetch('https://api-ai.jd.com/v1/messages/count_tokens', {
+    method: 'POST', body: JSON.stringify({ model: 'Example', messages: [{ role: 'user', content: 'hi' }] }),
+  })
+  assert.equal(r.status, 404)
+  assert.equal((await r.json()).error.type, 'unsupported_endpoint')
+  assert.equal(upstreamCalls, 0)
+})
