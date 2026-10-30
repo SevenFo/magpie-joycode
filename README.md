@@ -21,6 +21,10 @@ magpie plugin login joycode
 
 模型目录只从当前登录账号的接口获取，不内置型号列表，也不从旧的供应商模型声明中回填能力。未登录、目录查询失败或返回无效数据时，插件返回空目录；登录失效仍会提示重新登录。已选择的型号不会被这次目录查询改写。
 
+## Responses 历史重放
+
+`0.2.5` 同步上游 JoyCode 0.2.1 的修复：Responses 请求未显式设置 `store: true` 时，转发前仅移除 reasoning item 的持久化 `id`，避免 Codex 历史重放或压缩遇到 `Item with id 'rs_...' not found`。保留 `summary`、`encrypted_content`、推理档位及消息、工具调用和工具结果的 ID。显式 `store: true`、Chat 和 Anthropic 请求不变；此规则同样适用于配置的直接网关。
+
 ## 网关
 
 默认使用 JoyCode 公网签名网关，无需额外配置。

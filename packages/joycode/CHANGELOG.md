@@ -1,5 +1,10 @@
 # 更新记录
 
+## 0.2.5
+
+- 同步上游 JoyCode 0.2.1 的 Responses 历史重放修复：未显式设置 `store: true` 时，仅移除 reasoning item 的持久化 `id`，避免压缩请求因找不到该条目而失败。
+- 保留 reasoning 摘要、加密内容、推理档位和工具关联 ID；Chat、Anthropic 与显式存储的 Responses 请求不变。
+
 ## 0.2.4
 
 - Anthropic 的 /messages/count_tokens 在本地返回 404，不再把请求发给网关；Magpie 会改用本地估算。（对应上游 joycode 0.2.0 的同项修复）

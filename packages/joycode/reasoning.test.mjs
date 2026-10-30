@@ -78,3 +78,65 @@ test('Responses effort is forwarded unchanged without fetching Chat-only metadat
   const loader = await (await plugin.server({})).auth.loader(async () => auth)
   await loader.fetch('https://api-ai.jd.com/v1/responses', { method: 'POST', body: JSON.stringify(payload) })
 })
+
+const history = [
+  { type: 'message', id: 'msg_fixture', role: 'user', content: 'Synthetic query' },
+  { type: 'reasoning', id: 'rs_fixture', summary: [{ type: 'summary_text', text: 'Fixture summary' }], encrypted_content: 'fixture-encrypted-content' },
+  { type: 'reasoning', summary: [] },
+  { type: 'function_call', id: 'fc_fixture', call_id: 'call_fixture', name: 'ping', arguments: '{}' },
+  { type: 'function_call_output', id: 'output_fixture', call_id: 'call_fixture', output: 'Synthetic result' },
+]
+
+for (const [name, protocol, store, input, options] of [
+  ['unstored Responses', 'responses', false, history, {}],
+  ['Responses without an explicit store setting', 'responses', undefined, history, {}],
+  ['stored Responses', 'responses', true, history, {}],
+  ['Responses string input', 'responses', false, 'Synthetic query', {}],
+  ['direct Responses', 'responses', false, history, { gatewayMode: 'direct', baseURL: 'https://gateway.example.test/v1' }],
+  ['Chat', 'chat', false, history, {}],
+  ['Anthropic', 'anthropic', false, history, {}],
+]) {
+  test(`${name} strips only unpersisted Responses reasoning ids`, async t => {
+    let sent
+    const path = { responses: '/responses', chat: '/chat/completions', anthropic: '/messages' }[protocol]
+    const functionId = { responses: 'responses_completions', chat: 'chat_completions', anthropic: 'anthropic_completions' }[protocol]
+    const payload = {
+      model: 'Fixture model', input, reasoning: { effort: 'xhigh' },
+      tools: [{ type: 'function', name: 'ping', parameters: { type: 'object' } }],
+      ...(protocol === 'responses' ? {} : { messages: [{ role: 'user', content: 'Synthetic query' }] }),
+      ...(store === undefined ? {} : { store }),
+    }
+    t.mock.method(globalThis, 'fetch', async (url, init) => {
+      const parsed = new URL(url)
+      if (parsed.searchParams.get('functionId') === 'joycode_userInfo') {
+        return Response.json({ code: 0, data: { userId: 'fixture-user' } })
+      }
+      if (options.gatewayMode === 'direct') {
+        assert.equal(parsed.href, options.baseURL + path)
+      } else {
+        assert.equal(parsed.searchParams.get('functionId'), functionId)
+      }
+      sent = JSON.parse(init.body)
+      return Response.json(protocol === 'responses' ? { object: 'response', output: [] }
+        : protocol === 'anthropic' ? { type: 'message', content: [] } : { choices: [] })
+    })
+    const loader = await (await plugin.server({}, options)).auth.loader(async () => auth)
+    const response = await loader.fetch('https://placeholder.example.test/v1' + path, {
+      method: 'POST', body: JSON.stringify(payload),
+    })
+    assert.equal(response.status, 200)
+    const strip = protocol === 'responses' && store !== true && Array.isArray(input)
+    const expectedInput = strip ? history.map(item => {
+      if (item.type !== 'reasoning' || !Object.hasOwn(item, 'id')) return item
+      const { id, ...inline } = item
+      return inline
+    }) : input
+    assert.deepEqual(sent.input, expectedInput)
+    assert.equal(Object.hasOwn(sent, 'store'), Object.hasOwn(payload, 'store'))
+    assert.equal(sent.store, store)
+    assert.deepEqual(sent.reasoning, payload.reasoning)
+    assert.deepEqual(sent.tools, payload.tools)
+    assert.deepEqual(sent.messages, payload.messages)
+    assert.equal(history[1].id, 'rs_fixture')
+  })
+}

@@ -86,6 +86,21 @@ function requestProtocol(input) {
   throw new Error('Unsupported JoyCode request endpoint')
 }
 
+// JoyCode cannot resolve replayed reasoning ids unless those items were stored.
+// Keep inline summaries and encrypted content, along with every non-reasoning id.
+function withoutUnstoredReasoningIds(payload) {
+  if (payload?.store === true || !Array.isArray(payload?.input)) return payload
+  let changed = false
+  const input = payload.input.map(item => {
+    if (!item || typeof item !== 'object' || item.type !== 'reasoning' ||
+      !Object.prototype.hasOwnProperty.call(item, 'id')) return item
+    changed = true
+    const { id, ...inline } = item
+    return inline
+  })
+  return changed ? { ...payload, input } : payload
+}
+
 // Anthropic clients may probe /messages/count_tokens before generating.
 // JoyCode has no token-count endpoint, so answer locally with a 404 and let
 // magpie fall back to its own estimate instead of signing a paid request.
@@ -651,8 +666,9 @@ export const JoyCodeAuthPlugin = async (_input, options) => {
                 if (disabled) delete payload.reasoning_effort
               }
             }
+            const forwarded = protocol === 'responses' ? withoutUnstoredReasoningIds(payload) : payload
             const body = JSON.stringify({
-              ...(flatten ? flattenBody(payload) : payload),
+              ...(flatten ? flattenBody(payload) : forwarded),
               ...account,
               language: 'UNKNOWN',
             })
